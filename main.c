@@ -1,195 +1,127 @@
 #include "stm32f0xx.h"
 
-#define SIZE_ADC 1024
-uint16_t adc_data[SIZE_ADC];
+#include <stdint.h>
+#include <string.h>
+
+#define TEMP_CMD_SEND_DATA 0x7E
+#define TEMP_SAMPLES_COUNT 128
 
 
-float aver_left, aver_right, aver_all;
+#define TEMP_TS_CAL_1_ADDR (uint8_t*)0x1FFFF7B8
+#define TEMP_TS_CAL_2_ADDR (uint8_t*)0x1FFFF7C2
 
-void DMA1_Channel1_IRQHandler() {
-	if ((DMA1->ISR & DMA_ISR_HTIF1) == DMA_ISR_HTIF1) {
-		GPIOC->BSRR = GPIO_BSRR_BS_8;
-		DMA1->IFCR |= DMA_IFCR_CHTIF1;
-		///@todo
+#define TEMP_FIXED_POINT_FACTOR 100
 
-		//here result of aver_left
-	}
+uint8_t adc_data[TEMP_SAMPLES_COUNT];
+int16_t temperatures[TEMP_SAMPLES_COUNT];
+int16_t calibration_factor;
+const unsigned char error = 0xFF;
 
-	if ((DMA1->ISR & DMA_ISR_TCIF1) == DMA_ISR_TCIF1) {
-//		GPIOC->BSRR = GPIO_BSRR_BS_8;
-		DMA1->IFCR |= DMA_IFCR_CTCIF1;
-		///@todo
-		//here result of aver_right
-
-//		aver_all = (aver_left + aver_right)/ 2;
-		GPIOC->BSRR = GPIO_BSRR_BR_8;
-	}
-
-
+void usart_transmit(const unsigned char* buffer, uint16_t bytes_count)
+{
+	DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+	DMA1_Channel2->CMAR = (uint32_t)buffer;
+	DMA1_Channel2->CNDTR = bytes_count;
+	DMA1_Channel2->CCR |= DMA_CCR_EN;
 }
 
-uint8_t byteRx;
-
-void bufferPutToEnd() {
-
-}
-
-void USART1_IRQHandler() {
-	if ((USART1->ISR & USART_ISR_TXE) == USART_ISR_TXE) {
-		static uint8_t byte = 0;
-		USART1->TDR = byte++;
+void USART1_IRQHandler(void) {
+	uint16_t value;
+	if (USART1->ISR & USART_ISR_RXNE) {
+		value = USART1->RDR;
+		if (value != TEMP_CMD_SEND_DATA)
+		{
+			usart_transmit(&error, 1);
+		}
+		else
+		{
+			usart_transmit((const unsigned char*)temperatures, sizeof temperatures);
+		}
 	}
-
-	if ((USART1->ISR & USART_ISR_RXNE) == USART_ISR_RXNE) {
-		byteRx = USART1->RDR;
-		bufferPutToEnd();
+	else
+	{
+		// Error
+		value = USART1->RDR;
 	}
 }
 
-void init_tim3 (){
-	//RCC->APB1ENR
-}
-
-void adc_init_cont() {
-	RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
-	RCC->CR2 |= RCC_CR2_HSI14ON;
-
-	ADC1->CHSELR = ADC_CHSELR_CHSEL0;// | ADC_CHSELR_CHSEL1;	//adc_in0 - pa0, adc_in1 - pa1
+void usart_init(void)
+{
+	// Настройка GPIO
 	RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
-	GPIOA->MODER |= GPIO_MODER_MODER0 /*GPIO_MODER_MODER0_0 | GPIO_MODER_MODER0_1*/ |
-					GPIO_MODER_MODER1;	//analog function for pa0, pa1
-
-	ADC1->IER |= ADC_IER_EOCIE;
-	ADC1->IER |= ADC_IER_EOSEQIE;
-	NVIC_SetPriority(ADC1_COMP_IRQn, 5);
-	NVIC_EnableIRQ(ADC1_COMP_IRQn);
-
-	ADC1->CFGR1 |= ADC_CFGR1_CONT;
-
-	ADC1->CR |= ADC_CR_ADEN;
-
-	// DMA settings
-
-	ADC1->CFGR1 |= ADC_CFGR1_DMACFG;	//circular mode
-	ADC1->CFGR1 |= ADC_CFGR1_DMAEN;		//enable dma...
-
-	ADC1->CFGR1 |= ADC_CFGR1_OVRMOD;	//disable overrun
+	GPIOA->MODER |= GPIO_MODER_MODER9_1 | GPIO_MODER_MODER10_1;
+	GPIOA->OTYPER |= GPIO_OTYPER_OT_9;
+	GPIOA->PUPDR |= GPIO_PUPDR_PUPDR9_0 | GPIO_PUPDR_PUPDR10_0;
+	GPIOA->AFR[1] |= 0x00000110;
 
 	RCC->AHBENR |= RCC_AHBENR_DMAEN;
-	DMA1_Channel1->CCR |= DMA_CCR_HTIE | DMA_CCR_TCIE;
-	DMA1_Channel1->CCR |= DMA_CCR_MSIZE_0;	//16 bit
-	DMA1_Channel1->CCR |= DMA_CCR_PSIZE_0;
-	DMA1_Channel1->CCR |= DMA_CCR_MINC;
-	DMA1_Channel1->CCR &= ~DMA_CCR_DIR;	//per -> mem
-	DMA1_Channel1->CCR |= DMA_CCR_CIRC;
-
-	DMA1_Channel1->CMAR = (uint32_t)(&adc_data[0]);
-	DMA1_Channel1->CPAR = (uint32_t)(&(ADC1->DR));
-	DMA1_Channel1->CNDTR = SIZE_ADC;
-
-	NVIC_SetPriority(DMA1_Ch1_IRQn, 10);
-	NVIC_EnableIRQ(DMA1_Ch1_IRQn);
-
-	DMA1_Channel1->CCR |= DMA_CCR_EN;
-}
-
-
-void init_gpio_as_AF_for_usart() {
-	//1
-	RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
-	//2
-	GPIOA->MODER |= GPIO_MODER_MODER9_1 | GPIO_MODER_MODER10_1;
-	GPIOA->AFR[1] |=  (1 << 4)|(1 << 8);	//AF1
-
-	//3 - turn on peripheral...
-}
-
-
-void init_usart1() {
-
-
-	init_gpio_as_AF_for_usart();
+	DMA1_Channel2->CCR |= DMA_CCR_MINC | DMA_CCR_DIR;
+	DMA1_Channel2->CPAR = (uint32_t)&USART1->TDR;
 
 	RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-
-	USART1->CR1 |= USART_CR1_RE; //enable receive
-	USART1->CR1 |= USART_CR1_TE; //transmit enable
-	USART1->CR2 &= ~USART_CR2_STOP; //1 stop bit
-
-	//init interruption
-	USART1->CR1 |= USART_CR1_TXEIE;
-	USART1->BRR = SystemCoreClock / 8000;
-	USART1->CR1 |= USART_CR1_UE;
-
-	NVIC_SetPriority(USART1_IRQn, 2);
-
+	USART1->BRR |= 69;  // 115200
+	USART1->CR3 |= USART_CR3_DMAT | USART_CR3_EIE;
+	USART1->CR1 |= USART_CR1_RE | USART_CR1_TE | USART_CR1_RXNEIE;
+	NVIC_SetPriority(USART1_IRQn, 3);
 	NVIC_EnableIRQ(USART1_IRQn);
-
-
-}
-
-uint32_t data[256];
-void init_usart_dma() {
-
-	for (int i = 0; i < 256; i++) {
-		data[i] = i;
-	}
-
-//0 (3)
-	init_gpio_as_AF_for_usart();
-	//1
-	RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-	//2
-
-	USART1->CR1 |= USART_CR1_RE;	//enable receive
-	USART1->CR1 |= USART_CR1_TE;	//transmit enable
-	USART1->CR2 &= ~USART_CR2_STOP;	//1 stop bit
-
-	USART1->BRR = SystemCoreClock / 115200;
-	USART1->CR3 |= USART_CR3_DMAT;	//allow usart to work via DMA
-
-
-	RCC->AHBENR |= RCC_AHBENR_DMA1EN;
-	DMA1_Channel2->CPAR = (uint32_t)(&(USART1->TDR));
-	DMA1_Channel2->CMAR = (uint32_t)(&data[0]);
-	DMA1_Channel2->CNDTR = 256;
-	DMA1_Channel2->CCR |= DMA_CCR_TCIE;	//interruption
-	DMA1_Channel2->CCR |= DMA_CCR_DIR;	//read from memory
-	DMA1_Channel2->CCR |= DMA_CCR_MINC;
-//	DMA1_Channel2->CCR |= DMA_CCR_PSIZE | DMA_CCR_MSIZE;	size of data
-
-	NVIC_SetPriority(DMA1_Channel2_3_IRQn, 9);
-	NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
-
-
-	DMA1_Channel2->CCR |= DMA_CCR_EN;
-	//4
 	USART1->CR1 |= USART_CR1_UE;
 }
 
+void temp_init(void)
+{
+	// Настройка DMA (8-bit MSIZE/PSIZE, из периферии в память)
+	RCC->AHBENR |= RCC_AHBENR_DMAEN;
+	DMA1_Channel1->CCR |= DMA_CCR_MINC | DMA_CCR_CIRC | DMA_CCR_TCIE;
+	DMA1_Channel1->CMAR = (uint32_t)adc_data;
+	DMA1_Channel1->CNDTR = TEMP_SAMPLES_COUNT;
+	DMA1_Channel1->CPAR = (uint32_t)&ADC1->DR;
+	DMA1_Channel1->CCR |= DMA_CCR_EN;
 
-void adc_start() {
+	// Настройка АЦП
+	RCC->APB2ENR |= RCC_APB2ENR_ADCEN;
+	ADC1->SMPR |= ADC_SMPR1_SMPR;
+	ADC->CCR |= ADC_CCR_TSEN;
+	ADC1->CFGR1 |= ADC_CFGR1_EXTEN_0 | ADC_CFGR1_EXTSEL_1
+		| ADC_CFGR1_RES_0
+		| ADC_CFGR1_DMACFG | ADC_CFGR1_DMAEN;
+	ADC1->CHSELR |= ADC_CHSELR_CHSEL16;
+	ADC1->CR |= ADC_CR_ADEN;
+	while ((ADC1->ISR & ADC_ISR_ADRDY) == 0) {}
 	ADC1->CR |= ADC_CR_ADSTART;
+
+	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+	TIM2->PSC = 3999;
+	TIM2->ARR = 1;
+	TIM2->CR2 |= TIM_CR2_MMS_1;
+	TIM2->CR1 |= TIM_CR1_CEN;
 }
 
-void adc_stop() {
-	ADC1->CR |= ADC_CR_ADSTP;
+int16_t temp_calibrate(void)
+{
+	const int16_t ts_cal_delta = *TEMP_TS_CAL_2_ADDR - *TEMP_TS_CAL_1_ADDR;
+	return (110 - 30) * TEMP_FIXED_POINT_FACTOR / ts_cal_delta;
 }
 
+int16_t temp_convert(uint8_t raw)
+{
+	const uint8_t ts_cal_1 = *TEMP_TS_CAL_1_ADDR;
+	return calibration_factor * ((int16_t)raw - ts_cal_1) + 30 * TEMP_FIXED_POINT_FACTOR;
+}
+
+void DMA1_Channel1_IRQHandler(void)
+{
+	uint16_t idx = 0;
+	while(idx < TEMP_SAMPLES_COUNT)
+	{
+		temperatures[idx] = temp_convert(adc_data[idx]);
+		++idx;
+	}
+}
 
 int main(void)
 {
-	RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
-	GPIOC->MODER |= GPIO_MODER_MODER8_0;
-	init_usart1();
-	init_usart_dma();
-	adc_init_cont();
-	adc_start();
-
-
-
-  while (1)
-  {
-
-  }
+	calibration_factor = temp_calibrate();
+	temp_init();
+	usart_init();
+	return 0;
 }
